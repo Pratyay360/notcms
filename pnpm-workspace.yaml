@@ -1,5 +1,4 @@
 packages:
   - "packages/*"
   - "examples/*"
-  - "www"
   - "sync-action"
