@@ -51,7 +51,7 @@ This will:
 | Output | Description |
 |--------|-------------|
 | `files_changed` | Number of files written |
-| `pull_request_url` | URL of the created PR (if `on_change` is `pr` or `pr-auto-merge`) |
+| `pull_request_url` | URL of the created or updated PR (if `on_change` is `pr` or `pr-auto-merge`) |
 
 ## File Path Template
 
@@ -97,6 +97,7 @@ file_path: "docs/{title}-{id}.md"
 - Each `{var}` value is sanitized for filesystem safety (CJK characters preserved)
 - If any placeholder resolves to an empty value, the page is skipped with a warning
 - Files are only written when content has actually changed
+- In PR modes, an existing open NotCMS sync PR is reused. If the generated content already matches that PR, no new commit or PR is created. Generated files that were previously added to that PR are removed when their NotCMS page disappears or moves to a new path.
 
 ## Generated File Format
 

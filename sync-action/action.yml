@@ -35,7 +35,7 @@ outputs:
   files_changed:
     description: "Number of files changed"
   pull_request_url:
-    description: "URL of the created pull request (if on_change is pr or pr-auto-merge)"
+    description: "URL of the created or updated pull request (if on_change is pr or pr-auto-merge)"
 
 runs:
   using: "node20"

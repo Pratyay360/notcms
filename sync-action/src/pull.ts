@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import * as core from "@actions/core";
-import matter from "gray-matter";
 import { resolveFilePath } from "./file-mapper.js";
+import { hasMeaningfulMarkdownChange } from "./markdown/content.js";
 import { generateMarkdown } from "./markdown/frontmatter.js";
 import { fetchPages, fetchSchema } from "./notcms-client.js";
 
@@ -15,62 +15,11 @@ export interface PullOptions {
 
 export interface PullResult {
   filesChanged: number;
+  filesGenerated: string[];
   filesWritten: string[];
   filesSkipped: number;
-}
-
-/**
- * Order-independent deep equality for plain JSON-serializable values.
- */
-function deepEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
-  if (a == null || b == null) return a === b;
-  if (typeof a !== typeof b) return false;
-
-  if (Array.isArray(a)) {
-    if (!Array.isArray(b) || a.length !== b.length) return false;
-    return a.every((v, i) => deepEqual(v, b[i]));
-  }
-
-  if (typeof a === "object") {
-    const aObj = a as Record<string, unknown>;
-    const bObj = b as Record<string, unknown>;
-    const aKeys = Object.keys(aObj);
-    const bKeys = Object.keys(bObj);
-    if (aKeys.length !== bKeys.length) return false;
-    return aKeys.every((key) => key in bObj && deepEqual(aObj[key], bObj[key]));
-  }
-
-  return false;
-}
-
-/**
- * Compare content excluding notcms_last_synced_at to avoid unnecessary diffs.
- */
-function hasContentChanged(
-  existingContent: string,
-  newContent: string
-): boolean {
-  try {
-    const existing = matter(existingContent);
-    const generated = matter(newContent);
-
-    // Compare frontmatter without notcms_last_synced_at
-    const existingData = { ...existing.data };
-    const generatedData = { ...generated.data };
-    delete existingData.notcms_last_synced_at;
-    delete generatedData.notcms_last_synced_at;
-
-    if (!deepEqual(existingData, generatedData)) {
-      return true;
-    }
-
-    // Compare body content
-    return existing.content.trim() !== generated.content.trim();
-  } catch {
-    // If parsing fails, treat as changed
-    return true;
-  }
+  generatedNotCmsIds: string[];
+  seenNotCmsIds: string[];
 }
 
 export async function pull(options: PullOptions): Promise<PullResult> {
@@ -82,6 +31,9 @@ export async function pull(options: PullOptions): Promise<PullResult> {
   } = options;
 
   const filesWritten: string[] = [];
+  const filesGenerated: string[] = [];
+  const generatedNotCmsIds: string[] = [];
+  const seenNotCmsIds: string[] = [];
   let filesSkipped = 0;
 
   // 1. Fetch schema
@@ -98,6 +50,8 @@ export async function pull(options: PullOptions): Promise<PullResult> {
     core.info(`Found ${pages.length} page(s) in "${dbName}"`);
 
     for (const page of pages) {
+      seenNotCmsIds.push(page.id);
+
       if (page.content == null) {
         core.warning(
           `Skipping page "${page.title ?? page.id}" — content not yet synced`
@@ -121,12 +75,14 @@ export async function pull(options: PullOptions): Promise<PullResult> {
       }
 
       const markdown = generateMarkdown(page, dbName);
+      filesGenerated.push(filePath);
+      generatedNotCmsIds.push(page.id);
 
       // Check if file already exists with same content
       const absPath = path.resolve(filePath);
       try {
         const existing = await fs.readFile(absPath, "utf-8");
-        if (!hasContentChanged(existing, markdown)) {
+        if (!hasMeaningfulMarkdownChange(existing, markdown)) {
           continue; // No meaningful change
         }
       } catch {
@@ -146,7 +102,10 @@ export async function pull(options: PullOptions): Promise<PullResult> {
   );
   return {
     filesChanged: filesWritten.length,
+    filesGenerated,
     filesWritten,
     filesSkipped,
+    generatedNotCmsIds,
+    seenNotCmsIds,
   };
 }
