@@ -154,26 +154,22 @@ async function listChangedFiles(
   headRef: string
 ): Promise<string[]> {
   const chunks: Buffer[] = [];
-  await exec.exec(
-    "git",
-    ["diff", "--name-only", "-z", baseRef, headRef],
-    {
-      silent: true,
-      listeners: {
-        stdout: (data: Buffer) => {
-          chunks.push(data);
-        },
+  await exec.exec("git", ["diff", "--name-only", "-z", baseRef, headRef], {
+    silent: true,
+    listeners: {
+      stdout: (data: Buffer) => {
+        chunks.push(data);
       },
-    }
-  );
+    },
+  });
 
-  return Buffer.concat(chunks)
-    .toString("utf-8")
-    .split("\0")
-    .filter(Boolean);
+  return Buffer.concat(chunks).toString("utf-8").split("\0").filter(Boolean);
 }
 
-async function hasDiffAgainstRef(ref: string, files: string[]): Promise<boolean> {
+async function hasDiffAgainstRef(
+  ref: string,
+  files: string[]
+): Promise<boolean> {
   for (const file of files) {
     const refContent = await readGitFile(ref, file);
     if (refContent == null) {
@@ -385,7 +381,10 @@ export async function handleOnChange(
       filesToCompare,
       staleFiles
     );
-    await commitChanges([...filesToCompare, ...staleFiles], SYNC_COMMIT_MESSAGE);
+    await commitChanges(
+      [...filesToCompare, ...staleFiles],
+      SYNC_COMMIT_MESSAGE
+    );
     await pushToBranch(existingPr.branch);
 
     core.info(`Pull request updated: ${existingPr.url}`);
