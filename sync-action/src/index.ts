@@ -41,7 +41,10 @@ async function run(): Promise<void> {
     const onChangeResult = await handleOnChange(
       onChange,
       token,
-      result.filesWritten
+      result.filesWritten,
+      result.filesGenerated,
+      result.generatedNotCmsIds,
+      result.seenNotCmsIds
     );
 
     if (onChangeResult.pullRequestUrl) {

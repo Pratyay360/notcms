@@ -35183,15 +35183,26 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.configureGit = configureGit;
 exports.hasChanges = hasChanges;
+exports.findStaleSyncFiles = findStaleSyncFiles;
 exports.handleOnChange = handleOnChange;
+const promises_1 = __importDefault(__nccwpck_require__(1455));
+const node_path_1 = __importDefault(__nccwpck_require__(6760));
 const core = __importStar(__nccwpck_require__(8352));
 const exec = __importStar(__nccwpck_require__(7753));
 const github = __importStar(__nccwpck_require__(2669));
+const content_js_1 = __nccwpck_require__(7761);
 // Note: @actions/exec.exec() is NOT child_process.exec().
 // It uses spawn internally and is safe from shell injection.
+const SYNC_COMMIT_MESSAGE = "chore(notcms): sync content";
+const SYNC_PR_TITLE = "chore(notcms): sync content";
+const LEGACY_SYNC_PR_TITLE = "chore: sync content from NotCMS";
+const SYNC_BRANCH_PREFIX = "notcms/sync-";
 async function configureGit() {
     await exec.exec("git", ["config", "user.name", "github-actions[bot]"]);
     await exec.exec("git", [
@@ -35203,6 +35214,7 @@ async function configureGit() {
 async function hasChanges() {
     let output = "";
     await exec.exec("git", ["status", "--porcelain"], {
+        silent: true,
         listeners: {
             stdout: (data) => {
                 output += data.toString();
@@ -35212,12 +35224,170 @@ async function hasChanges() {
     return output.trim().length > 0;
 }
 async function commitChanges(files, message) {
-    await exec.exec("git", ["add", ...files]);
+    await exec.exec("git", ["add", "--", ...files]);
     await exec.exec("git", ["commit", "-m", message]);
 }
 async function pushToBranch(branch) {
     // Push to remote branch without switching the local working tree
     await exec.exec("git", ["push", "origin", `HEAD:refs/heads/${branch}`]);
+}
+function defaultBranch() {
+    return github.context.payload.repository?.default_branch ?? "main";
+}
+async function findOpenSyncPr(token) {
+    const octokit = github.getOctokit(token);
+    const { owner, repo } = github.context.repo;
+    const repositoryFullName = `${owner}/${repo}`;
+    const { data: prs } = await octokit.rest.pulls.list({
+        owner,
+        repo,
+        state: "open",
+        base: defaultBranch(),
+        sort: "updated",
+        direction: "desc",
+        per_page: 100,
+    });
+    const pr = prs.find((candidate) => [SYNC_PR_TITLE, LEGACY_SYNC_PR_TITLE].includes(candidate.title) &&
+        candidate.head.repo?.full_name === repositoryFullName &&
+        candidate.head.ref.startsWith(SYNC_BRANCH_PREFIX));
+    if (!pr) {
+        return null;
+    }
+    return {
+        number: pr.number,
+        url: pr.html_url,
+        branch: pr.head.ref,
+    };
+}
+async function fetchBranch(branch) {
+    const remoteRef = `refs/remotes/origin/${branch}`;
+    await exec.exec("git", [
+        "fetch",
+        "origin",
+        `+refs/heads/${branch}:${remoteRef}`,
+    ]);
+    return remoteRef;
+}
+async function gitBlobId(ref, file) {
+    let output = "";
+    const exitCode = await exec.exec("git", ["ls-tree", "-z", ref, "--", file], {
+        ignoreReturnCode: true,
+        silent: true,
+        listeners: {
+            stdout: (data) => {
+                output += data.toString();
+            },
+        },
+    });
+    if (exitCode !== 0) {
+        throw new Error(`Failed to inspect ${file} in ${ref}`);
+    }
+    const entry = output.split("\0").find(Boolean);
+    const match = entry?.match(/\bblob ([0-9a-f]{40,64})\t/);
+    return match?.[1] ?? null;
+}
+async function readGitBlob(blobId) {
+    const chunks = [];
+    await exec.exec("git", ["cat-file", "-p", blobId], {
+        silent: true,
+        listeners: {
+            stdout: (data) => {
+                chunks.push(data);
+            },
+        },
+    });
+    return Buffer.concat(chunks);
+}
+async function readGitFile(ref, file) {
+    const blobId = await gitBlobId(ref, file);
+    if (!blobId) {
+        return null;
+    }
+    return (await readGitBlob(blobId)).toString("utf-8");
+}
+async function listChangedFiles(baseRef, headRef) {
+    const chunks = [];
+    await exec.exec("git", ["diff", "--name-only", "-z", baseRef, headRef], {
+        silent: true,
+        listeners: {
+            stdout: (data) => {
+                chunks.push(data);
+            },
+        },
+    });
+    return Buffer.concat(chunks)
+        .toString("utf-8")
+        .split("\0")
+        .filter(Boolean);
+}
+async function hasDiffAgainstRef(ref, files) {
+    for (const file of files) {
+        const refContent = await readGitFile(ref, file);
+        if (refContent == null) {
+            return true;
+        }
+        const currentContent = await promises_1.default.readFile(file, "utf-8");
+        if ((0, content_js_1.hasMeaningfulMarkdownChange)(refContent, currentContent)) {
+            return true;
+        }
+    }
+    return false;
+}
+async function findStaleSyncFiles(baseRef, headRef, generatedFiles, generatedNotCmsIds, seenNotCmsIds) {
+    const generatedFileSet = new Set(generatedFiles);
+    const generatedIdSet = new Set(generatedNotCmsIds);
+    const seenIdSet = new Set(seenNotCmsIds);
+    const changedFiles = await listChangedFiles(baseRef, headRef);
+    const staleFiles = [];
+    for (const file of changedFiles) {
+        if (generatedFileSet.has(file)) {
+            continue;
+        }
+        const content = await readGitFile(headRef, file);
+        if (content == null) {
+            continue;
+        }
+        const metadata = (0, content_js_1.readNotCmsMetadata)(content);
+        if (!metadata) {
+            continue;
+        }
+        if (!seenIdSet.has(metadata.id) || generatedIdSet.has(metadata.id)) {
+            staleFiles.push(file);
+        }
+    }
+    return staleFiles;
+}
+async function readGeneratedFiles(files) {
+    return Promise.all(files.map(async (file) => ({
+        path: file,
+        content: await promises_1.default.readFile(file, "utf-8"),
+    })));
+}
+async function restoreCleanWorktree(files) {
+    const trackedFiles = [];
+    for (const file of files) {
+        if (await gitBlobId("HEAD", file)) {
+            trackedFiles.push(file);
+        }
+        else {
+            await promises_1.default.rm(file, { force: true });
+        }
+    }
+    if (trackedFiles.length > 0) {
+        await exec.exec("git", ["checkout", "--", ...trackedFiles]);
+    }
+}
+async function checkoutBranchWithGeneratedChanges(branch, ref, generatedFiles, staleFiles) {
+    const generatedFileContents = await readGeneratedFiles(generatedFiles);
+    await restoreCleanWorktree(generatedFiles);
+    await exec.exec("git", ["checkout", "-B", branch, ref]);
+    for (const file of staleFiles) {
+        await promises_1.default.rm(file, { force: true });
+    }
+    for (const file of generatedFileContents) {
+        await promises_1.default.mkdir(node_path_1.default.dirname(file.path), { recursive: true });
+        await promises_1.default.writeFile(file.path, file.content);
+    }
 }
 async function createPr(token, branch, title, body) {
     const octokit = github.getOctokit(token);
@@ -35228,7 +35398,7 @@ async function createPr(token, branch, title, body) {
         title,
         body,
         head: branch,
-        base: github.context.payload.repository?.default_branch ?? "main",
+        base: defaultBranch(),
     });
     return pr.html_url;
 }
@@ -35257,23 +35427,50 @@ async function enableAutoMerge(token, prUrl) {
         core.warning(`Failed to enable auto-merge (is it enabled in repo settings?): ${error}`);
     }
 }
-async function handleOnChange(mode, token, filesWritten) {
-    if (filesWritten.length === 0) {
+async function handleOnChange(mode, token, filesWritten, filesGenerated = filesWritten, generatedNotCmsIds = [], seenNotCmsIds = null) {
+    if (filesWritten.length === 0 && mode === "commit") {
         core.info("No changes detected, skipping git operations");
         return {};
     }
     await configureGit();
-    await commitChanges(filesWritten, "chore: sync content from NotCMS");
     if (mode === "commit") {
+        await commitChanges(filesWritten, SYNC_COMMIT_MESSAGE);
         await exec.exec("git", ["push"]);
         core.info("Changes committed and pushed directly");
         return {};
     }
     // PR modes
+    const existingPr = await findOpenSyncPr(token);
+    if (existingPr) {
+        core.info(`Found existing sync PR #${existingPr.number}: ${existingPr.url}`);
+        const existingPrRef = await fetchBranch(existingPr.branch);
+        const filesToCompare = filesGenerated;
+        const staleFiles = seenNotCmsIds == null
+            ? []
+            : await findStaleSyncFiles(await fetchBranch(defaultBranch()), existingPrRef, filesToCompare, generatedNotCmsIds, seenNotCmsIds);
+        if (staleFiles.length === 0 &&
+            !(await hasDiffAgainstRef(existingPrRef, filesToCompare))) {
+            core.info("Existing sync PR already matches generated content; skipping");
+            return { pullRequestUrl: existingPr.url };
+        }
+        await checkoutBranchWithGeneratedChanges(existingPr.branch, existingPrRef, filesToCompare, staleFiles);
+        await commitChanges([...filesToCompare, ...staleFiles], SYNC_COMMIT_MESSAGE);
+        await pushToBranch(existingPr.branch);
+        core.info(`Pull request updated: ${existingPr.url}`);
+        if (mode === "pr-auto-merge") {
+            await enableAutoMerge(token, existingPr.url);
+        }
+        return { pullRequestUrl: existingPr.url };
+    }
+    if (filesWritten.length === 0) {
+        core.info("No changes detected, skipping git operations");
+        return {};
+    }
     const timestamp = Date.now();
     const branch = `notcms/sync-${timestamp}`;
+    await commitChanges(filesWritten, SYNC_COMMIT_MESSAGE);
     await pushToBranch(branch);
-    const prUrl = await createPr(token, branch, "chore: sync content from NotCMS", [
+    const prUrl = await createPr(token, branch, SYNC_PR_TITLE, [
         "## Summary",
         "",
         `Synced ${filesWritten.length} file(s) from NotCMS.`,
@@ -35358,7 +35555,7 @@ async function run() {
         core.setOutput("files_changed", result.filesChanged);
         // Handle git operations
         const token = core.getInput("github_token");
-        const onChangeResult = await (0, git_js_1.handleOnChange)(onChange, token, result.filesWritten);
+        const onChangeResult = await (0, git_js_1.handleOnChange)(onChange, token, result.filesWritten, result.filesGenerated, result.generatedNotCmsIds, result.seenNotCmsIds);
         if (onChangeResult.pullRequestUrl) {
             core.setOutput("pull_request_url", onChangeResult.pullRequestUrl);
         }
@@ -35368,6 +35565,82 @@ async function run() {
     }
 }
 run();
+
+
+/***/ }),
+
+/***/ 7761:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.hasMeaningfulMarkdownChange = hasMeaningfulMarkdownChange;
+exports.readNotCmsMetadata = readNotCmsMetadata;
+const gray_matter_1 = __importDefault(__nccwpck_require__(3200));
+/**
+ * Order-independent deep equality for plain JSON-serializable values.
+ */
+function deepEqual(a, b) {
+    if (a === b)
+        return true;
+    if (a == null || b == null)
+        return a === b;
+    if (typeof a !== typeof b)
+        return false;
+    if (Array.isArray(a)) {
+        if (!Array.isArray(b) || a.length !== b.length)
+            return false;
+        return a.every((v, i) => deepEqual(v, b[i]));
+    }
+    if (typeof a === "object") {
+        const aObj = a;
+        const bObj = b;
+        const aKeys = Object.keys(aObj);
+        const bKeys = Object.keys(bObj);
+        if (aKeys.length !== bKeys.length)
+            return false;
+        return aKeys.every((key) => key in bObj && deepEqual(aObj[key], bObj[key]));
+    }
+    return false;
+}
+function removeVolatileFrontmatter(data) {
+    const stableData = { ...data };
+    delete stableData.notcms_last_synced_at;
+    return stableData;
+}
+/**
+ * Compare generated Markdown while ignoring volatile sync metadata.
+ */
+function hasMeaningfulMarkdownChange(existingContent, newContent) {
+    try {
+        const existing = (0, gray_matter_1.default)(existingContent);
+        const generated = (0, gray_matter_1.default)(newContent);
+        if (!deepEqual(removeVolatileFrontmatter(existing.data), removeVolatileFrontmatter(generated.data))) {
+            return true;
+        }
+        return existing.content.trim() !== generated.content.trim();
+    }
+    catch {
+        return true;
+    }
+}
+function readNotCmsMetadata(content) {
+    try {
+        const parsed = (0, gray_matter_1.default)(content);
+        const { notcms_id: id, notcms_db: db } = parsed.data;
+        if (typeof id !== "string" || typeof db !== "string") {
+            return null;
+        }
+        return { id, db };
+    }
+    catch {
+        return null;
+    }
+}
 
 
 /***/ }),
@@ -35500,62 +35773,16 @@ exports.pull = pull;
 const promises_1 = __importDefault(__nccwpck_require__(1455));
 const node_path_1 = __importDefault(__nccwpck_require__(6760));
 const core = __importStar(__nccwpck_require__(8352));
-const gray_matter_1 = __importDefault(__nccwpck_require__(3200));
 const file_mapper_js_1 = __nccwpck_require__(9360);
+const content_js_1 = __nccwpck_require__(7761);
 const frontmatter_js_1 = __nccwpck_require__(4670);
 const notcms_client_js_1 = __nccwpck_require__(6998);
-/**
- * Order-independent deep equality for plain JSON-serializable values.
- */
-function deepEqual(a, b) {
-    if (a === b)
-        return true;
-    if (a == null || b == null)
-        return a === b;
-    if (typeof a !== typeof b)
-        return false;
-    if (Array.isArray(a)) {
-        if (!Array.isArray(b) || a.length !== b.length)
-            return false;
-        return a.every((v, i) => deepEqual(v, b[i]));
-    }
-    if (typeof a === "object") {
-        const aObj = a;
-        const bObj = b;
-        const aKeys = Object.keys(aObj);
-        const bKeys = Object.keys(bObj);
-        if (aKeys.length !== bKeys.length)
-            return false;
-        return aKeys.every((key) => key in bObj && deepEqual(aObj[key], bObj[key]));
-    }
-    return false;
-}
-/**
- * Compare content excluding notcms_last_synced_at to avoid unnecessary diffs.
- */
-function hasContentChanged(existingContent, newContent) {
-    try {
-        const existing = (0, gray_matter_1.default)(existingContent);
-        const generated = (0, gray_matter_1.default)(newContent);
-        // Compare frontmatter without notcms_last_synced_at
-        const existingData = { ...existing.data };
-        const generatedData = { ...generated.data };
-        delete existingData.notcms_last_synced_at;
-        delete generatedData.notcms_last_synced_at;
-        if (!deepEqual(existingData, generatedData)) {
-            return true;
-        }
-        // Compare body content
-        return existing.content.trim() !== generated.content.trim();
-    }
-    catch {
-        // If parsing fails, treat as changed
-        return true;
-    }
-}
 async function pull(options) {
     const { apiHost, workspaceId, secretKey, filePath: filePathTemplate, } = options;
     const filesWritten = [];
+    const filesGenerated = [];
+    const generatedNotCmsIds = [];
+    const seenNotCmsIds = [];
     let filesSkipped = 0;
     // 1. Fetch schema
     core.info("Fetching schema from NotCMS...");
@@ -35569,6 +35796,7 @@ async function pull(options) {
         const pages = await (0, notcms_client_js_1.fetchPages)(apiHost, workspaceId, db.id, secretKey);
         core.info(`Found ${pages.length} page(s) in "${dbName}"`);
         for (const page of pages) {
+            seenNotCmsIds.push(page.id);
             if (page.content == null) {
                 core.warning(`Skipping page "${page.title ?? page.id}" — content not yet synced`);
                 filesSkipped++;
@@ -35582,11 +35810,13 @@ async function pull(options) {
                 continue;
             }
             const markdown = (0, frontmatter_js_1.generateMarkdown)(page, dbName);
+            filesGenerated.push(filePath);
+            generatedNotCmsIds.push(page.id);
             // Check if file already exists with same content
             const absPath = node_path_1.default.resolve(filePath);
             try {
                 const existing = await promises_1.default.readFile(absPath, "utf-8");
-                if (!hasContentChanged(existing, markdown)) {
+                if (!(0, content_js_1.hasMeaningfulMarkdownChange)(existing, markdown)) {
                     continue; // No meaningful change
                 }
             }
@@ -35603,8 +35833,11 @@ async function pull(options) {
     core.info(`Pull complete: ${filesWritten.length} file(s) written, ${filesSkipped} skipped`);
     return {
         filesChanged: filesWritten.length,
+        filesGenerated,
         filesWritten,
         filesSkipped,
+        generatedNotCmsIds,
+        seenNotCmsIds,
     };
 }
 
