@@ -11,14 +11,7 @@
       "path": "packages/notcms-kit"
     },
     {
-      "path": "www"
-    },
-    {
       "path": "docs"
-    },
-    {
-      "name": "www-home",
-      "path": "www/app/[locale]/home"
     },
     {
       "path": "examples"

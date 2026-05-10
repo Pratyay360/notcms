@@ -124,6 +124,8 @@ Check out these examples to get started quickly:
 - 📚 [Next.js Simple Blog Template](https://github.com/qqpann/notcms/tree/main/examples/nextjs-simple-blog-template)
 - 🎨 [More templates available on our website](https://notcms.com/templates)
 
+Runnable example source lives under [`examples/`](examples/).
+
 ## Troubleshooting
 
 ### Authentication Errors
