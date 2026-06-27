@@ -2,3 +2,9 @@ packages:
   - "packages/*"
   - "examples/*"
   - "sync-action"
+
+verifyDepsBeforeRun: false
+allowBuilds:
+  '@biomejs/biome': true
+  esbuild: true
+  msw: true
