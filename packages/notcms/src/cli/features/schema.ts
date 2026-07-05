@@ -1,16 +1,36 @@
 import chalk from "chalk";
 import dedent from "dedent";
+import { PROPERTY_TYPES, type Properties, type Schema } from "../../types.js";
 import { routes } from "../routes.js";
 
 const DASHBOARD_URL = "https://dash.notcms.com/";
 
-type Schema = Record<
-  string,
-  {
-    id: string;
-    properties: Record<string, string>;
-  }
->;
+const PROPERTY_TYPE_SET: ReadonlySet<string> = new Set(PROPERTY_TYPES);
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isProperties(value: unknown): value is Properties {
+  return (
+    isPlainObject(value) &&
+    Object.values(value).every(
+      (type) => typeof type === "string" && PROPERTY_TYPE_SET.has(type)
+    )
+  );
+}
+
+function isSchemaEntry(entry: unknown): entry is Schema[string] {
+  return (
+    isPlainObject(entry) &&
+    typeof entry.id === "string" &&
+    isProperties(entry.properties)
+  );
+}
+
+function isSchema(value: unknown): value is Schema {
+  return isPlainObject(value) && Object.values(value).every(isSchemaEntry);
+}
 export async function fetchSchema(): Promise<Schema> {
   const { NOTCMS_SECRET_KEY, NOTCMS_WORKSPACE_ID } = process.env;
   if (!NOTCMS_SECRET_KEY || !NOTCMS_WORKSPACE_ID) {
@@ -45,11 +65,12 @@ export async function fetchSchema(): Promise<Schema> {
     },
   });
   try {
-    const data = (await res.json()) as { schema: Schema };
-    if (typeof data.schema !== "object") {
-      throw new Error(
-        `Invalid schema. Expected string, found ${typeof data.schema}.`
-      );
+    if (!res.ok) {
+      throw new Error(`Unexpected status ${res.status}`);
+    }
+    const data = (await res.json()) as { schema?: unknown };
+    if (!isSchema(data.schema)) {
+      throw new Error("Invalid schema payload.");
     }
     return data.schema;
   } catch (error) {

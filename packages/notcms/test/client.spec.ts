@@ -1,0 +1,133 @@
+import { Client } from "../src/client";
+import { schema } from "./sample-schema";
+
+const HOST = "https://api.notcms.com/v1";
+
+function jsonResponse(body: unknown, init?: ResponseInit): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+    ...init,
+  });
+}
+
+describe("Client constructor", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("throws when secretKey is not provided", () => {
+    vi.stubEnv("NOTCMS_SECRET_KEY", undefined);
+    vi.stubEnv("NOTCMS_WORKSPACE_ID", "ws_1");
+
+    expect(() => new Client({ schema })).toThrow(/secretKey is required/);
+  });
+
+  it("throws when workspaceId is not provided", () => {
+    vi.stubEnv("NOTCMS_SECRET_KEY", "sk_1");
+    vi.stubEnv("NOTCMS_WORKSPACE_ID", undefined);
+
+    expect(() => new Client({ schema })).toThrow(/workspaceId is required/);
+  });
+
+  it("throws when schema is not provided", () => {
+    vi.stubEnv("NOTCMS_SECRET_KEY", "sk_1");
+    vi.stubEnv("NOTCMS_WORKSPACE_ID", "ws_1");
+
+    expect(() => new Client<typeof schema>()).toThrow(/schema is required/);
+  });
+
+  it("reads credentials from environment variables and builds query handlers", () => {
+    vi.stubEnv("NOTCMS_SECRET_KEY", "sk_env");
+    vi.stubEnv("NOTCMS_WORKSPACE_ID", "ws_env");
+
+    const nc = new Client({ schema });
+
+    expect(Object.keys(nc.query)).toEqual(Object.keys(schema));
+  });
+});
+
+describe("DatabaseHandler", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function createClient() {
+    return new Client({
+      secretKey: "sk_test",
+      workspaceId: "ws_test",
+      schema,
+    });
+  }
+
+  it("lists pages with a bearer authorization header", async () => {
+    const pages = [{ id: "p1", title: "Hello", properties: {} }];
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ data: pages }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const [data, error, response] = await createClient().query.abc.list();
+
+    expect(fetchMock).toHaveBeenCalledWith(`${HOST}/ws/ws_test/db/abc/pages`, {
+      method: "GET",
+      headers: {
+        Authorization: "Bearer sk_test",
+        "Content-Type": "application/json",
+      },
+    });
+    expect(error).toBeNull();
+    expect(data).toEqual(pages);
+    expect(response?.status).toBe(200);
+  });
+
+  it("gets a single page by id", async () => {
+    const page = { id: "p1", title: "Hello", properties: {} };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ data: page }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const [data, error] = await createClient().query.abc.get("p1");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${HOST}/ws/ws_test/db/abc/pages/p1`,
+      expect.objectContaining({ method: "GET" })
+    );
+    expect(error).toBeNull();
+    expect(data).toEqual(page);
+  });
+
+  it("returns an error tuple with the response on HTTP failures", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("Invalid API key", {
+          status: 401,
+          statusText: "Unauthorized",
+        })
+      )
+    );
+
+    const [data, error, response] = await createClient().query.abc.list();
+
+    expect(data).toBeUndefined();
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).toContain("401");
+    expect(error?.message).toContain("Invalid API key");
+    expect(response?.status).toBe(401);
+  });
+
+  it("returns an error tuple without a response on network failures", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new TypeError("fetch failed"))
+    );
+
+    const [data, error, response] = await createClient().query.abc.list();
+
+    expect(data).toBeUndefined();
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).toBe("fetch failed");
+    expect(response).toBeUndefined();
+  });
+});
