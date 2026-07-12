@@ -1,33 +1,41 @@
-export type Properties = Record<
-  string,
+/**
+ * Runtime list of supported property types.
+ * Single source of truth for both the `Properties` type and
+ * runtime validation (e.g. CLI schema pull).
+ */
+export const PROPERTY_TYPES = [
   // boolean
-  | "checkbox"
+  "checkbox",
   // number
-  | "number"
+  "number",
   // string
-  | "select"
-  | "title"
-  | "url"
-  | "created_by"
-  | "last_edited_by"
-  | "email"
-  | "phone_number"
-  | "rich_text"
-  | "status"
-  | "unique_id"
-  | "formula"
+  "select",
+  "title",
+  "url",
+  "created_by",
+  "last_edited_by",
+  "email",
+  "phone_number",
+  "rich_text",
+  "status",
+  "unique_id",
+  "formula",
   // string (Date)
-  | "date"
-  | "created_time"
-  | "last_edited_time"
+  "date",
+  "created_time",
+  "last_edited_time",
   // string (unsupported)
-  | "rollup"
+  "rollup",
   // string[]
-  | "multi_select"
-  | "files"
-  | "people"
-  | "relation"
->;
+  "multi_select",
+  "files",
+  "people",
+  "relation",
+] as const;
+
+export type PropertyType = (typeof PROPERTY_TYPES)[number];
+
+export type Properties = Record<string, PropertyType>;
 
 export type Schema = Record<string, { id: string; properties: Properties }>;
 
