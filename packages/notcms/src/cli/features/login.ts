@@ -199,6 +199,9 @@ function renderResultPage(success: boolean): string {
   const message = success
     ? "You are logged in to NotCMS. You can close this tab and return to the terminal."
     : "Something went wrong. Return to the terminal and try again.";
+  const dashboardLink = success
+    ? `<a class="dashboard-link" href="${new URL("/", getDashHost()).toString()}">Go to dashboard</a>`
+    : "";
   return dedent`
     <!doctype html>
     <html>
@@ -207,15 +210,19 @@ function renderResultPage(success: boolean): string {
         <title>${title} - NotCMS</title>
         <style>
           body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0a0a0a; color: #fafafa; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
-          main { text-align: center; }
+          main { padding: 1.5rem; text-align: center; }
           h1 { font-size: 1.5rem; }
           p { color: #a1a1aa; }
+          .dashboard-link { display: inline-flex; margin-top: 0.75rem; padding: 0.5rem 0.75rem; border: 1px solid #27272a; border-radius: 0.5rem; color: #a1a1aa; font-size: 0.875rem; text-decoration: none; transition: background-color 150ms, border-color 150ms, color 150ms; }
+          .dashboard-link:hover { border-color: #52525b; background: #18181b; color: #fafafa; }
+          .dashboard-link:focus-visible { outline: 2px solid #f9a8d4; outline-offset: 3px; }
         </style>
       </head>
       <body>
         <main>
           <h1>${success ? "✓" : "✗"} ${title}</h1>
           <p>${message}</p>
+          ${dashboardLink}
         </main>
       </body>
     </html>

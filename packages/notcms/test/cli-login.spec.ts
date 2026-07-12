@@ -159,12 +159,16 @@ describe("loginViaBrowser", () => {
       `http://127.0.0.1:${port}/callback?secret_key=sk&workspace_id=ws&state=wrong`
     );
     expect(badResponse.status).toBe(400);
+    expect(await badResponse.text()).not.toContain("Go to dashboard");
 
     // Correct state resolves the login
     const goodResponse = await fetch(
       `http://127.0.0.1:${port}/callback?secret_key=ncsec_ok&workspace_id=ws_ok&state=${state}`
     );
     expect(goodResponse.status).toBe(200);
+    const resultPage = await goodResponse.text();
+    expect(resultPage).toContain('href="https://dash.example.com/"');
+    expect(resultPage).toContain("Go to dashboard");
 
     await expect(loginPromise).resolves.toEqual({
       secretKey: "ncsec_ok",
