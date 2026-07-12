@@ -35315,10 +35315,7 @@ async function listChangedFiles(baseRef, headRef) {
             },
         },
     });
-    return Buffer.concat(chunks)
-        .toString("utf-8")
-        .split("\0")
-        .filter(Boolean);
+    return Buffer.concat(chunks).toString("utf-8").split("\0").filter(Boolean);
 }
 async function hasDiffAgainstRef(ref, files) {
     for (const file of files) {

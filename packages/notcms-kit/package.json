@@ -22,7 +22,7 @@
     "url": "https://github.com/qqpann"
   },
   "engines": {
-    "node": ">=12.0"
+    "node": ">=18.17.0"
   },
   "keywords": ["notcms", "cms", "deprecated"],
   "bugs": {
@@ -31,7 +31,7 @@
   "homepage": "https://github.com/qqpann/notcms#readme",
   "dependencies": {},
   "devDependencies": {
-    "@types/node": "^22.1.0",
+    "@types/node": "^24.0.0",
     "typescript": "^5"
   }
 }
