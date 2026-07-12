@@ -18,6 +18,8 @@ export function BlogPagesList({
   pages: Pages;
   writers: Writers;
 }) {
+  const featuredPage = pages[0];
+
   return (
     <main className="container max-w-[1440px] px-4 md:px-32 mx-auto py-8">
       <div className="flex flex-col w-full mb-8 items-start gap-5 flex-[0_0_auto]">
@@ -60,13 +62,15 @@ export function BlogPagesList({
       </div>
 
       <div className="grid grid-cols-1 gap-8">
-        <HeroBlogPostCard
-          className="hidden md:flex"
-          page={pages[0]}
-          writer={writers.find(
-            (w) => w.id === pages[0].properties.writers?.[0]
-          )}
-        />
+        {featuredPage && (
+          <HeroBlogPostCard
+            className="hidden md:flex"
+            page={featuredPage}
+            writer={writers.find(
+              (writer) => writer.id === featuredPage.properties.writers?.[0]
+            )}
+          />
+        )}
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 md:first:hidden">
           {pages.map((page, i) => {
