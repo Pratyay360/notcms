@@ -40,7 +40,7 @@
     "url": "https://github.com/qqpann"
   },
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=18.17.0"
   },
   "keywords": [
     "notcms",
