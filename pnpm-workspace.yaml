@@ -8,3 +8,6 @@ allowBuilds:
   '@biomejs/biome': true
   esbuild: true
   msw: true
+  'sharp@0.34.5': true
+minimumReleaseAgeExclude:
+  - postcss@8.5.17

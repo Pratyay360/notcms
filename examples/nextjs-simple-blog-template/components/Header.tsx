@@ -1,6 +1,6 @@
 import React from "react";
 
-export const Header = (): JSX.Element => {
+export const Header = (): React.JSX.Element => {
   return (
     <div className="flex w-[1440px] h-16 items-center gap-10 px-32 py-0 relative">
       <div className="flex items-center gap-2 relative flex-1 grow">
