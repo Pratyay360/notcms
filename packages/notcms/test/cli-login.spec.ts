@@ -127,52 +127,100 @@ describe("saveCredentials", () => {
 });
 
 describe("loginViaBrowser", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+  });
+
   afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
-  it("resolves with credentials delivered to the local callback", async () => {
-    vi.stubEnv("NOTCMS_DASH_HOST", "https://dash.example.com");
+  it("polls the API until the dashboard approves the device", async () => {
+    vi.stubEnv("NOTCMS_API_HOST", "https://api.example.com/v1");
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            device_code: "device-code-with-enough-entropy-1234567890",
+            user_code: "ABCD-EFGH",
+            verification_uri: "https://dash.example.com/cli/login",
+            verification_uri_complete:
+              "https://dash.example.com/cli/login?user_code=ABCD-EFGH",
+            expires_in: 600,
+            interval: 1,
+          }),
+          { status: 200 }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: "authorization_pending" }), {
+          status: 400,
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            token_type: "notcms_secret",
+            secret_key: "ncsec_ok",
+            workspace_id: "ws_ok",
+          }),
+          { status: 200 }
+        )
+      );
+    vi.stubGlobal("fetch", fetchMock);
 
     const loginPromise = loginViaBrowser();
-
-    // Wait for the login URL to be printed, then extract port and state
-    await vi.waitFor(() => {
-      expect(logSpy).toHaveBeenCalled();
-    });
-    const printed = logSpy.mock.calls.map((args) => args.join(" ")).join("\n");
-    // strip ANSI color codes
-    const plain = printed.replace(/\[[0-9;]*m/g, "");
-    const url = new URL(
-      plain.match(/https:\/\/dash\.example\.com\/cli\/login\?[^\s]+/)?.[0] ?? ""
-    );
-    const port = url.searchParams.get("port");
-    const state = url.searchParams.get("state");
-    expect(port).not.toBeNull();
-    expect(state).toMatch(/^[0-9a-f]{32}$/);
-    expect(spawnMock).toHaveBeenCalled();
-
-    // Wrong state is rejected and the server keeps waiting
-    const badResponse = await fetch(
-      `http://127.0.0.1:${port}/callback?secret_key=sk&workspace_id=ws&state=wrong`
-    );
-    expect(badResponse.status).toBe(400);
-    expect(await badResponse.text()).not.toContain("Go to dashboard");
-
-    // Correct state resolves the login
-    const goodResponse = await fetch(
-      `http://127.0.0.1:${port}/callback?secret_key=ncsec_ok&workspace_id=ws_ok&state=${state}`
-    );
-    expect(goodResponse.status).toBe(200);
-    const resultPage = await goodResponse.text();
-    expect(resultPage).toContain('href="https://dash.example.com/"');
-    expect(resultPage).toContain("Go to dashboard");
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(1000);
 
     await expect(loginPromise).resolves.toEqual({
       secretKey: "ncsec_ok",
       workspaceId: "ws_ok",
     });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "https://api.example.com/v1/cli/device/authorization"
+    );
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "https://api.example.com/v1/cli/device/token"
+    );
+    expect(spawnMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.arrayContaining([
+        "https://dash.example.com/cli/login?user_code=ABCD-EFGH",
+      ]),
+      expect.objectContaining({ detached: true })
+    );
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("ABCD-EFGH"));
+  });
+
+  it("rejects a non-HTTPS browser URL returned by the API", async () => {
+    vi.stubEnv("NOTCMS_API_HOST", "https://api.example.com/v1");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            device_code: "device-code-with-enough-entropy-1234567890",
+            user_code: "ABCD-EFGH",
+            verification_uri: "http://attacker.example/cli/login",
+            verification_uri_complete:
+              "http://attacker.example/cli/login?user_code=ABCD-EFGH",
+            expires_in: 600,
+            interval: 5,
+          }),
+          { status: 200 }
+        )
+      )
+    );
+
+    await expect(loginViaBrowser()).rejects.toThrow("unsafe browser login URL");
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 });

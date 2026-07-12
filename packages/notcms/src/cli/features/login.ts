@@ -1,14 +1,24 @@
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
 import * as path from "node:path";
 import chalk from "chalk";
 import dedent from "dedent";
-import { getDashHost } from "../variables.js";
+import { getApiHost } from "../variables.js";
 
-const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+const CLI_DEVICE_CLIENT_ID = "notcms-cli";
+const CLI_DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
+const DEFAULT_POLL_INTERVAL_SECONDS = 5;
+const MAX_POLL_INTERVAL_SECONDS = 30;
+const REQUEST_TIMEOUT_MS = 15 * 1000;
+
+type DeviceAuthorization = {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  verificationUriComplete: string;
+  expiresIn: number;
+  interval: number;
+};
 
 export type Credentials = {
   secretKey: string;
@@ -29,72 +39,29 @@ export function getCredentialsFromEnv(): Credentials | null {
 /**
  * Log in to NotCMS via browser.
  *
- * Starts a one-shot HTTP server on 127.0.0.1 and opens the dashboard's CLI
- * login page. The dashboard mints a secret key for the workspace the user
- * picks and redirects back to the local server with the credentials.
+ * Requests a device authorization from the API, opens the dashboard's CLI
+ * login page, and polls the API until the user approves the request.
  */
-export function loginViaBrowser(): Promise<Credentials> {
-  const state = randomBytes(16).toString("hex");
+export async function loginViaBrowser(): Promise<Credentials> {
+  const authorization = await requestDeviceAuthorization();
+  const verificationUrl = parseBrowserUrl(authorization.verificationUri);
+  const browserUrl = parseBrowserUrl(authorization.verificationUriComplete);
+  if (verificationUrl.origin !== browserUrl.origin) {
+    throw new Error("The API returned mismatched browser login URLs.");
+  }
 
-  return new Promise<Credentials>((resolve, reject) => {
-    let finished = false;
-    const finish = (settle: () => void) => {
-      if (finished) {
-        return;
-      }
-      finished = true;
-      clearTimeout(timeout);
-      // Close after the in-flight response is flushed.
-      setImmediate(() => server.close());
-      settle();
-    };
+  console.log(dedent`
+    Opening your browser to log in to NotCMS...
 
-    const timeout = setTimeout(() => {
-      finish(() =>
-        reject(new Error("Login timed out. Run the command again to retry."))
-      );
-    }, LOGIN_TIMEOUT_MS);
+    Confirm this code in the browser:
+    ${chalk.bold(authorization.userCode)}
 
-    const server = createServer((req, res) => {
-      const url = new URL(req.url ?? "/", "http://127.0.0.1");
-      if (url.pathname !== "/callback") {
-        res.writeHead(404, { "Content-Type": "text/plain" });
-        res.end("Not found");
-        return;
-      }
+    If the browser does not open, visit:
+    ${chalk.blue(verificationUrl.toString())}
+  `);
+  openBrowser(browserUrl.toString());
 
-      const secretKey = url.searchParams.get("secret_key");
-      const workspaceId = url.searchParams.get("workspace_id");
-      const receivedState = url.searchParams.get("state");
-      if (receivedState !== state || !secretKey || !workspaceId) {
-        // Ignore requests that don't carry our state and keep waiting.
-        res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(renderResultPage(false));
-        return;
-      }
-
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(renderResultPage(true));
-      finish(() => resolve({ secretKey, workspaceId }));
-    });
-
-    server.on("error", (error) => finish(() => reject(error)));
-
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address() as AddressInfo;
-      const loginUrl = new URL("/cli/login", getDashHost());
-      loginUrl.searchParams.set("port", String(port));
-      loginUrl.searchParams.set("state", state);
-
-      console.log(dedent`
-        Opening your browser to log in to NotCMS...
-
-        If the browser does not open, visit:
-        ${chalk.blue(loginUrl.toString())}
-      `);
-      openBrowser(loginUrl.toString());
-    });
-  });
+  return pollForCredentials(authorization);
 }
 
 /**
@@ -194,37 +161,182 @@ function openBrowser(url: string): void {
   child.unref();
 }
 
-function renderResultPage(success: boolean): string {
-  const title = success ? "Login successful" : "Login failed";
-  const message = success
-    ? "You are logged in to NotCMS. You can close this tab and return to the terminal."
-    : "Something went wrong. Return to the terminal and try again.";
-  const dashboardLink = success
-    ? `<a class="dashboard-link" href="${new URL("/", getDashHost()).toString()}">Go to dashboard</a>`
-    : "";
-  return dedent`
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <title>${title} - NotCMS</title>
-        <style>
-          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0a0a0a; color: #fafafa; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
-          main { padding: 1.5rem; text-align: center; }
-          h1 { font-size: 1.5rem; }
-          p { color: #a1a1aa; }
-          .dashboard-link { display: inline-flex; margin-top: 0.75rem; padding: 0.5rem 0.75rem; border: 1px solid #27272a; border-radius: 0.5rem; color: #a1a1aa; font-size: 0.875rem; text-decoration: none; transition: background-color 150ms, border-color 150ms, color 150ms; }
-          .dashboard-link:hover { border-color: #52525b; background: #18181b; color: #fafafa; }
-          .dashboard-link:focus-visible { outline: 2px solid #f9a8d4; outline-offset: 3px; }
-        </style>
-      </head>
-      <body>
-        <main>
-          <h1>${success ? "✓" : "✗"} ${title}</h1>
-          <p>${message}</p>
-          ${dashboardLink}
-        </main>
-      </body>
-    </html>
-  `;
+async function requestDeviceAuthorization(): Promise<DeviceAuthorization> {
+  let response: Response;
+  try {
+    response = await fetch(buildApiUrl("cli/device/authorization"), {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ client_id: CLI_DEVICE_CLIENT_ID }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    throw new Error("Failed to start browser login. Please try again.");
+  }
+
+  let data: unknown;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error("Failed to start browser login. Please try again.");
+  }
+
+  if (!response.ok || !isDeviceAuthorizationResponse(data)) {
+    throw new Error("Failed to start browser login. Please try again.");
+  }
+
+  return {
+    deviceCode: data.device_code,
+    userCode: data.user_code,
+    verificationUri: data.verification_uri,
+    verificationUriComplete: data.verification_uri_complete,
+    expiresIn: data.expires_in,
+    interval: data.interval ?? DEFAULT_POLL_INTERVAL_SECONDS,
+  };
+}
+
+async function pollForCredentials(
+  authorization: DeviceAuthorization
+): Promise<Credentials> {
+  const deadline = Date.now() + authorization.expiresIn * 1000;
+  let intervalSeconds = Math.max(
+    1,
+    Math.min(authorization.interval, MAX_POLL_INTERVAL_SECONDS)
+  );
+
+  while (Date.now() < deadline) {
+    await delay(intervalSeconds * 1000);
+
+    let response: Response;
+    try {
+      response = await fetch(buildApiUrl("cli/device/token"), {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: CLI_DEVICE_CLIENT_ID,
+          device_code: authorization.deviceCode,
+          grant_type: CLI_DEVICE_GRANT_TYPE,
+        }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch {
+      intervalSeconds = Math.min(
+        intervalSeconds * 2,
+        MAX_POLL_INTERVAL_SECONDS
+      );
+      continue;
+    }
+
+    let data: unknown;
+    try {
+      data = await response.json();
+    } catch {
+      intervalSeconds = Math.min(
+        intervalSeconds * 2,
+        MAX_POLL_INTERVAL_SECONDS
+      );
+      continue;
+    }
+    if (response.ok && isTokenResponse(data)) {
+      return {
+        secretKey: data.secret_key,
+        workspaceId: data.workspace_id,
+      };
+    }
+
+    const error = getDeviceError(data);
+    if (error === "authorization_pending") {
+      continue;
+    }
+    if (error === "slow_down") {
+      intervalSeconds = Math.min(
+        intervalSeconds + 5,
+        MAX_POLL_INTERVAL_SECONDS
+      );
+      continue;
+    }
+    if (error === "access_denied") {
+      throw new Error("Login was denied.");
+    }
+    if (error === "expired_token") {
+      throw new Error("Login timed out. Run the command again to retry.");
+    }
+    throw new Error("Browser login failed. Run the command again to retry.");
+  }
+
+  throw new Error("Login timed out. Run the command again to retry.");
+}
+
+function buildApiUrl(pathname: string): string {
+  const url = new URL(getApiHost());
+  url.pathname = `${url.pathname.replace(/\/$/, "")}/${pathname}`;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+function parseBrowserUrl(value: string): URL {
+  const url = new URL(value);
+  const isLoopback =
+    url.hostname === "localhost" ||
+    url.hostname === "127.0.0.1" ||
+    url.hostname === "[::1]";
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback)) {
+    throw new Error("The API returned an unsafe browser login URL.");
+  }
+  return url;
+}
+
+function isDeviceAuthorizationResponse(value: unknown): value is {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete: string;
+  expires_in: number;
+  interval?: number;
+} {
+  return (
+    isRecord(value) &&
+    typeof value.device_code === "string" &&
+    value.device_code.length >= 32 &&
+    value.device_code.length <= 256 &&
+    typeof value.user_code === "string" &&
+    /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}$/.test(
+      value.user_code
+    ) &&
+    typeof value.verification_uri === "string" &&
+    typeof value.verification_uri_complete === "string" &&
+    typeof value.expires_in === "number" &&
+    Number.isFinite(value.expires_in) &&
+    value.expires_in > 0 &&
+    (value.interval === undefined ||
+      (typeof value.interval === "number" &&
+        Number.isFinite(value.interval) &&
+        value.interval > 0))
+  );
+}
+
+function isTokenResponse(value: unknown): value is {
+  secret_key: string;
+  workspace_id: string;
+} {
+  return (
+    isRecord(value) &&
+    typeof value.secret_key === "string" &&
+    typeof value.workspace_id === "string"
+  );
+}
+
+function getDeviceError(value: unknown): string | null {
+  return isRecord(value) && typeof value.error === "string"
+    ? value.error
+    : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
